@@ -14,9 +14,9 @@ pairs_key = {}
 PAIRS = {'WTI vs. Brent': 'pair1', 'Gold vs. Silver': 'pair2', 
          'SOFR 3M Future vs. DUK Spot': 'pair3', 'Corn vs. Soybean Oil': 'pair4', 
          'Bitcoin ETF vs. Ethereum ETF': 'pair5'}
-CANDLE_SIZES = {'1 minute': '1T', '2 minutes': '2T', '3 minutes': '3T',
-                '4 minutes': '4T', '5 minutes': '5T', '15 minutes': '15T',
-                '1 hour': '1H'}
+CANDLE_SIZES = {'1 minute': '1min', '2 minutes': '2min', '3 minutes': '3min',
+                '4 minutes': '4min', '5 minutes': '5min', '15 minutes': '15min',
+                '1 hour': '1h'}
 
 selected_pair = st.sidebar.selectbox("Select Pair", list(PAIRS.keys())) 
 current_pair = PAIRS[selected_pair]
@@ -47,7 +47,7 @@ def load_pairs_data(current_pair, candle_size='1T'):
     asset1 = pairs_data[current_pair][0].ffill()
     asset2 = pairs_data[current_pair][1].ffill()
 
-    if candle_size != '1T':
+    if candle_size != '1min':
         asset1.index = pd.to_datetime(asset1.index)
         asset2.index = pd.to_datetime(asset2.index)
 
