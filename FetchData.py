@@ -65,20 +65,65 @@ if __name__ == "__main__":
     # }
 
 
+    # pairs = {
+    #     "gold_future": {
+    #         "dataset": "GLBX.MDP3",
+    #         "symbol": "GCZ5", 
+    #         "start": start, 
+    #         "end": end
+    #     }, 
+    #     "silver_future": {
+    #         "dataset": "GLBX.MDP3", 
+    #         "symbol": "SIZ5", 
+    #         "start": start, 
+    #         "end": end
+    #     }
+    # }
+
+
+    # pairs = {
+    #     "sofr_3m_future": {
+    #         "dataset": "GLBX.MDP3",
+    #         "symbol": "SR3Z5", 
+    #         "start": start, 
+    #         "end": end
+    #     }, 
+    #     "duk_spot": {
+    #         "dataset": "XNAS.ITCH", 
+    #         "symbol": "DUK", 
+    #         "start": start, 
+    #         "end": end
+    #     }
+    # }
+    
+    # pairs = {
+    #     "corn_future": {
+    #         "dataset": "GLBX.MDP3",
+    #         "symbol": "ZCZ5", 
+    #         "start": start, 
+    #         "end": end
+    #     }, 
+    #     "soybean_oil_future": {
+    #         "dataset": "GLBX.MDP3",
+    #         "symbol": "ZLZ5", 
+    #         "start": start, 
+    #         "end": end
+    #     }
+    # }
+
     pairs = {
-        "gold_future": {
-            "dataset": "GLBX.MDP3",
-            "symbol": "GCZ5", 
+        "ibit_etf": {
+            "dataset": "XNAS.ITCH",
+            "symbol": "IBIT", 
             "start": start, 
             "end": end
         }, 
-        "silver_future": {
-            "dataset": "GLBX.MDP3", 
-            "symbol": "SIZ5", 
+        "etha_etf": {
+            "dataset": "XNAS.ITCH",
+            "symbol": "ETHA", 
             "start": start, 
             "end": end
         }
     }
-
     # fetch_pairs_data("pair1", pairs, location)
-    fetch_pairs_data("pair2", pairs, location)
+    fetch_pairs_data("pair5", pairs, location)

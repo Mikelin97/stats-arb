@@ -11,8 +11,12 @@ pairs_key = {}
 
 
 
-PAIRS = {'WTI vs. Brent': 'pair1', 'Gold vs. Silver': 'pair2'}
-CANDLE_SIZES = {'1 minute': '1T', '5 minutes': '5T', '15 minutes': '15T', '1 hour': '1H'}
+PAIRS = {'WTI vs. Brent': 'pair1', 'Gold vs. Silver': 'pair2', 
+         'SOFR 3M Future vs. DUK Spot': 'pair3', 'Corn vs. Soybean Oil': 'pair4', 
+         'Bitcoin ETF vs. Ethereum ETF': 'pair5'}
+CANDLE_SIZES = {'1 minute': '1T', '2 minutes': '2T', '3 minutes': '3T',
+                '4 minutes': '4T', '5 minutes': '5T', '15 minutes': '15T',
+                '1 hour': '1H'}
 
 selected_pair = st.sidebar.selectbox("Select Pair", list(PAIRS.keys())) 
 current_pair = PAIRS[selected_pair]
@@ -125,9 +129,12 @@ selected_index = unique_dates.index(selected_date)
 if selected_index + 1 < len(unique_dates):
     end_date = unique_dates[selected_index + 1]
     selected_data = pair_close.loc[unique_dates[selected_index]:end_date]
+    selected_asset1 = asset1.loc[selected_data.index]
+    selected_asset2 = asset2.loc[selected_data.index]
 else:
     selected_data = pair_close.loc[unique_dates[selected_index]:]
-
+    selected_asset1 = asset1.loc[selected_data.index]
+    selected_asset2 = asset2.loc[selected_data.index]
 blocks = (selected_data['cointegrated'].diff().fillna(0) != 0).cumsum()
 
 coint_blocks = blocks[selected_data['cointegrated'] == 1]
@@ -136,76 +143,89 @@ coint_period_ids = coint_blocks.unique()
 
 
 
+if len(coint_period_ids) == 0:
+    st.write("#### No cointegrated periods found for the selected date.")
+    st.write(selected_data)
+    st.write(f"#### {pairs_key[current_pair][0]} data:")
+    st.write(selected_asset1) 
+    st.write(f"#### {pairs_key[current_pair][1]} data:")
+    st.write(selected_asset2)
 
-for i, block_id in enumerate(coint_period_ids):
-    # Create a mask for the current cointegrated period
-    mask = (blocks == block_id) & (selected_data['cointegrated'] == 1)
-    period_df = selected_data[mask]
+else: 
 
-
-    
-
-    start_time = period_df.index[0]
-    end_time = period_df.index[-1]
-    
-    st.write(period_df)
-    asset1.loc[period_df.index]
-    asset2.loc[period_df.index]
-
-    num_plots = 3
-
-    fig = make_subplots(rows=num_plots, cols=1, shared_xaxes=True, vertical_spacing=0.3,
-                        specs=[
-                            [{}],                    # Row 1: no secondary axis
-                            [{"secondary_y": True}], # Row 2: price + volume
-                            [{"secondary_y": True}]  # Row 3: price + volume
-                        ],
-                        subplot_titles=("Z-Score of Residuals", f"{pairs_key[current_pair][0]} Price", f"{pairs_key[current_pair][1]} Price"))
-    fig.add_trace(go.Scatter(x=period_df.index, y=period_df['zscore'], name='Z-Score'), row=1, col=1)
-    fig.add_trace(
-        go.Bar(
-            x=asset1.loc[period_df.index].index,
-            y=asset1.loc[period_df.index]['volume'],
-            name='Volume',
-            marker_color='lightgray', 
-            opacity=0.4
-        ),
-        row=2, col=1, secondary_y=True
-    )
-    fig.add_trace(go.Candlestick(x=asset1.loc[period_df.index].index,
-                                 open=asset1.loc[period_df.index]['open'],
-                                 high=asset1.loc[period_df.index]['high'],
-                                 low=asset1.loc[period_df.index]['low'],
-                                 close=asset1.loc[period_df.index]['close'],
-                                 name=pairs_key[current_pair][0]), row=2, col=1, secondary_y=False)
-    fig.add_trace(
-        go.Bar(
-            x=asset2.loc[period_df.index].index,
-            y=asset2.loc[period_df.index]['volume'],
-            name='Volume',
-            marker_color='lightgray',
-            opacity=0.4
-        ),
-        row=3, col=1, secondary_y=True
-    )
-    fig.add_trace(go.Candlestick(x=asset2.loc[period_df.index].index,
-                                 open=asset2.loc[period_df.index]['open'],
-                                 high=asset2.loc[period_df.index]['high'],
-                                 low=asset2.loc[period_df.index]['low'],
-                                 close=asset2.loc[period_df.index]['close'],
-                                 name=pairs_key[current_pair][1]), row=3, col=1, secondary_y=False)
-    
-    
-
-    fig.update_layout(height=1000, width=800, 
-                      title_text=f"Cointegrated Period {i+1} Analysis : from {start_time} to {end_time}",
-                      hovermode='x unified', barmode='overlay',)
+    for i, block_id in enumerate(coint_period_ids):
+        # Create a mask for the current cointegrated period
+        mask = (blocks == block_id) & (selected_data['cointegrated'] == 1)
+        period_df = selected_data[mask]
 
 
-    fig.update_xaxes(showticklabels=True, row=1, col=1)
+        
 
-    
-    
+        start_time = period_df.index[0]
+        end_time = period_df.index[-1]
+        st.write(f"#### Close price data from {start_time} to {end_time}")
+        st.write(period_df)
+        st.write(f"#### {pairs_key[current_pair][0]} data:")
+        st.write(asset1.loc[period_df.index])
+        st.write(f"#### {pairs_key[current_pair][1]} data:")
+        st.write(asset2.loc[period_df.index])
 
-    
-    st.plotly_chart(fig)
+        num_plots = 3
+
+        fig = make_subplots(rows=num_plots, cols=1, shared_xaxes=True, vertical_spacing=0.3,
+                            specs=[
+                                [{}],                    # Row 1: no secondary axis
+                                [{"secondary_y": True}], # Row 2: price + volume
+                                [{"secondary_y": True}]  # Row 3: price + volume
+                            ],
+                            subplot_titles=("Z-Score of Residuals", f"{pairs_key[current_pair][0]} Price", f"{pairs_key[current_pair][1]} Price"))
+        fig.add_trace(go.Scatter(x=period_df.index, y=period_df['zscore'], name='Z-Score'), row=1, col=1)
+        fig.add_trace(
+            go.Bar(
+                x=asset1.loc[period_df.index].index,
+                y=asset1.loc[period_df.index]['volume'],
+                name='Volume',
+                marker_color='lightgray', 
+                opacity=0.4
+            ),
+            row=2, col=1, secondary_y=True
+        )
+        fig.add_trace(go.Candlestick(x=asset1.loc[period_df.index].index,
+                                    open=asset1.loc[period_df.index]['open'],
+                                    high=asset1.loc[period_df.index]['high'],
+                                    low=asset1.loc[period_df.index]['low'],
+                                    close=asset1.loc[period_df.index]['close'],
+                                    name=pairs_key[current_pair][0]), row=2, col=1, secondary_y=False)
+        fig.add_trace(
+            go.Bar(
+                x=asset2.loc[period_df.index].index,
+                y=asset2.loc[period_df.index]['volume'],
+                name='Volume',
+                marker_color='lightgray',
+                opacity=0.4
+            ),
+            row=3, col=1, secondary_y=True
+        )
+        fig.add_trace(go.Candlestick(x=asset2.loc[period_df.index].index,
+                                    open=asset2.loc[period_df.index]['open'],
+                                    high=asset2.loc[period_df.index]['high'],
+                                    low=asset2.loc[period_df.index]['low'],
+                                    close=asset2.loc[period_df.index]['close'],
+                                    name=pairs_key[current_pair][1]), row=3, col=1, secondary_y=False)
+        
+        
+
+        fig.update_layout(height=1000, width=800, 
+                        title_text=f"Cointegrated Period {i+1} Analysis : from {start_time} to {end_time}",
+                        hovermode='x unified', barmode='overlay',)
+
+
+        fig.update_xaxes(showticklabels=True, row=1, col=1)
+
+        
+        
+
+        
+        st.plotly_chart(fig)
+
+
