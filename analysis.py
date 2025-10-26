@@ -11,16 +11,23 @@ pairs_key = {}
 
 
 
-pairs = {'WTI vs. Brent': 'pair1', 'Gold vs. Silver': 'pair2'}
-selected_pair = st.sidebar.selectbox("Select Pair", list(pairs.keys())) 
-current_pair = pairs[selected_pair]
+PAIRS = {'WTI vs. Brent': 'pair1', 'Gold vs. Silver': 'pair2'}
+CANDLE_SIZES = {'1 minute': '1T', '5 minutes': '5T', '15 minutes': '15T', '1 hour': '1H'}
+
+selected_pair = st.sidebar.selectbox("Select Pair", list(PAIRS.keys())) 
+current_pair = PAIRS[selected_pair]
+
+selected_candle_size = st.sidebar.selectbox("Select Candle Size", list(CANDLE_SIZES.keys()))
+current_candle_size = CANDLE_SIZES[selected_candle_size]
+
+
 
 lookback = 100 
 p_threshold = 0.05
 
 
 
-def load_pairs_data(current_pair):
+def load_pairs_data(current_pair, candle_size='1T'):
     pairs_data[current_pair] = [
         pd.read_csv(f"data/{f}", index_col=0) for f in os.listdir('data')
         if f.startswith(current_pair) and f.endswith('.csv')
@@ -36,19 +43,45 @@ def load_pairs_data(current_pair):
     asset1 = pairs_data[current_pair][0].ffill()
     asset2 = pairs_data[current_pair][1].ffill()
 
+    if candle_size != '1T':
+        asset1.index = pd.to_datetime(asset1.index)
+        asset2.index = pd.to_datetime(asset2.index)
+
+        asset1 = asset1.resample(candle_size).agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).ffill()
+
+        asset2 = asset2.resample(candle_size).agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).ffill()
+
+        asset1.index = asset1.index.astype(str)
+        asset2.index = asset2.index.astype(str)
 
 
-    ### getting close price at each candle 
-
-    asset1_close = asset1['close'].to_frame(name=pairs_key[current_pair][0])
-    asset2_close = asset2['close'].to_frame(name=pairs_key[current_pair][1])
-
-    pair_close = asset1_close.join(asset2_close, how='outer').dropna()
-
-    return asset1, asset2, pair_close 
+    return asset1, asset2
 
 
-asset1, asset2, pair_close = load_pairs_data(current_pair)
+asset1, asset2 = load_pairs_data(current_pair, current_candle_size)  
+
+
+### getting close price at each candle 
+
+asset1_close = asset1['close'].to_frame(name=pairs_key[current_pair][0])
+asset2_close = asset2['close'].to_frame(name=pairs_key[current_pair][1])
+
+pair_close = asset1_close.join(asset2_close, how='outer').dropna()
+
+    
+
 
 
 
