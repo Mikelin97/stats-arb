@@ -21,7 +21,7 @@ def to_excel(df):
 
 ### read in backtest data
 df = pd.read_csv(
-    "/Users/mike/Duke/fintech590/1pairs_trade/data/pair_1_cointegration_1min.csv",
+    "data/pair_1_cointegration_1min.csv",
     index_col=0,
 )
 
