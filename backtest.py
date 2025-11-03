@@ -223,7 +223,7 @@ fig3.add_trace(
 st.plotly_chart(fig3)
 
 
-### Plot Gross PnL Over Time
+### Plot Cumulative Gross PnL Over Time
 fig4 = make_subplots(
     rows=1,
     cols=1,
@@ -232,7 +232,7 @@ fig4 = make_subplots(
     specs=[
         [{}],  # Row 1: no secondary axis
     ],
-    subplot_titles=(f"Gross PnL Over Time for {selected_pair}",),
+    subplot_titles=(f"Cumulative Gross PnL Over Time for {selected_pair}",),
 )
 fig4.add_trace(
     go.Scatter(
@@ -244,6 +244,31 @@ fig4.add_trace(
     col=1,
 )
 st.plotly_chart(fig4)
+
+
+### Plot Gross PnL Over Time as Bar Chart
+fig5 = make_subplots(
+    rows=1,
+    cols=1,
+    shared_xaxes=True,
+    vertical_spacing=0.3,
+    specs=[
+        [{}],  # Row 1: no secondary axis
+    ],
+    subplot_titles=(f"Gross PnL Over Time for {selected_pair}",),
+)
+fig5.add_trace(
+    go.Bar(
+        x=selected_df.index,
+        y=selected_df["gross_pnl"],
+        name="Gross PnL",
+    ),
+    row=1,
+    col=1,
+)
+### make bars green for positive pnl and red for negative pnl
+fig5.update_traces(marker_color=np.where(selected_df["gross_pnl"] >= 0, "green", "red"))
+st.plotly_chart(fig5)
 
 
 ### Performance Metrics
