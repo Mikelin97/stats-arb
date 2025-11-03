@@ -1,9 +1,23 @@
 import pandas as pd
+from io import BytesIO
 import matplotlib.pyplot as plt
 import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
+
+def to_excel(df):
+    output = BytesIO()
+    writer = pd.ExcelWriter(output, engine="xlsxwriter")
+    df.to_excel(writer, index=False, sheet_name="Sheet1")
+    workbook = writer.book
+    worksheet = writer.sheets["Sheet1"]
+    format1 = workbook.add_format({"num_format": "0.00"})
+    worksheet.set_column("A:A", None, format1)
+    writer.close()
+    processed_data = output.getvalue()
+    return processed_data
 
 
 ### read in backtest data
@@ -258,3 +272,71 @@ st.markdown(
     f"**Average Cash Deployed per Minute:** ${avg_cash_deployed_per_minute:,.2f}"
 )
 st.markdown(f"**Maximum Cash Deployed:** ${max_cash_deployed:,.2f}")
+
+
+### Generate blotter records
+blotter_raw_df = selected_df[[pair[0], pair[1], position_x, position_y, "gross_pnl"]]
+
+### perform vectorized to output a blotter with trade entries and No action
+blotter_raw_df["status"] = np.where(
+    blotter_raw_df[position_x] != 0, "ENTRY", "NO ACTION"
+)
+
+### it entries a trade every minute when status is entry, and exit a trade the next minute
+
+trade_id = 1
+records = []
+for i in range(len(blotter_raw_df) - 1):
+    ### TODO: working, but need to handle the last trade exit properly
+    row = blotter_raw_df.iloc[i]
+
+    next_row = blotter_raw_df.iloc[i + 1] if i + 1 < len(blotter_raw_df) else None
+
+    if row.status == "ENTRY":
+        record1 = {
+            "trade_id": trade_id,
+            "timestamp": row.name,
+            "action": "BUY" if row[position_x] > 0 else "SHORT",
+            "quantity": row[position_x],
+            "price": row[pair[0]],
+            "status": "ENTRY",
+        }
+        record2 = {
+            "trade_id": trade_id,
+            "timestamp": row.name,
+            "action": "BUY" if row[position_y] > 0 else "SHORT",
+            "quantity": row[position_y],
+            "price": row[pair[1]],
+            "status": "ENTRY",
+        }
+        record3 = {
+            "trade_id": trade_id,
+            "timestamp": next_row.name if next_row is not None else None,
+            "action": "SELL" if row[position_x] > 0 else "COVER",
+            "quantity": -row[position_x],
+            "price": next_row[pair[0]] if next_row is not None else None,
+            "status": "EXIT",
+        }
+        record4 = {
+            "trade_id": trade_id,
+            "timestamp": next_row.name if next_row is not None else None,
+            "action": "SELL" if row[position_y] > 0 else "COVER",
+            "quantity": -row[position_y],
+            "price": next_row[pair[1]] if next_row is not None else None,
+            "status": "EXIT",
+        }
+        records.extend([record1, record2, record3, record4])
+        trade_id += 1
+
+blotter_df = pd.DataFrame.from_records(records)
+blotter_df["trade_id"] = blotter_df["trade_id"].astype(str)
+
+df_xlsx = to_excel(blotter_df)
+
+
+st.sidebar.download_button(
+    label="Download Blotter as Excel",
+    data=df_xlsx,
+    file_name="blotter.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
