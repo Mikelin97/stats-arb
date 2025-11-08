@@ -1,14 +1,17 @@
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
 from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from sklearn.linear_model import LinearRegression
+from statsmodels.tsa.stattools import coint
 import streamlit as st
 
-
+DATA_DIR = Path("data")
 @dataclass(frozen=True)
 class AssetConfig:
     price_col: str
@@ -32,9 +35,10 @@ class AssetConfig:
 
 @dataclass(frozen=True)
 class PairConfig:
+    pair_id: str
     asset_x: AssetConfig
     asset_y: AssetConfig
-    data_file: str
+    candle_size: str = "1min"
 
 
 @dataclass
@@ -54,27 +58,30 @@ DEFAULT_MAX_VOLUME_TAKE_RATE = 0.1
 DEFAULT_NUM_CONTRACTS = 1
 DEFAULT_STOP_ENTRY_THRESHOLD = 4.0
 AVG_TRADING_HOURS = 6.5
+DEFAULT_COINTEGRATION_LOOKBACK = 100
+DEFAULT_COINTEGRATION_P_THRESHOLD = 0.05
 
 
 PAIRS: Dict[str, PairConfig] = {
     "WTI Future vs. Brent Future": PairConfig(
+        pair_id="pair1",
         asset_x=AssetConfig(
-            price_col="pair1_wti_oil_future",
+            price_col="pair1_wti_oil_future_ohlcv-1m",
             display="WTI Future",
             tick_size=0.01,
             tick_value=10.0,
             contract_size=1000.0,
         ),
         asset_y=AssetConfig(
-            price_col="pair1_brent_oil_future",
+            price_col="pair1_brent_oil_future_ohlcv-1m",
             display="Brent Future",
             tick_size=0.01,
             tick_value=10.0,
             contract_size=1000.0,
         ),
-        data_file="pair_1_cointegration_1min",
     ),
     "NatGas HH vs. NatGas LS": PairConfig(
+        pair_id="pair6",
         asset_x=AssetConfig(
             price_col="pair6_natgas_hh_future_ohlcv-1m",
             display="Henry Hub NG",
@@ -89,9 +96,9 @@ PAIRS: Dict[str, PairConfig] = {
             tick_value=10.0,
             contract_size=10000.0,
         ),
-        data_file="pair_6_cointegration_1min",
     ),
     "MSTR vs. IBIT": PairConfig(
+        pair_id="pair7",
         asset_x=AssetConfig(
             price_col="pair7_mstr_spot_ohlcv-1m",
             display="MSTR",
@@ -106,9 +113,9 @@ PAIRS: Dict[str, PairConfig] = {
             tick_value=1.0,
             contract_size=1.0,
         ),
-        data_file="pair_7_cointegration_1min",
     ),
     "Gold Future vs. Micro Gold Future": PairConfig(
+        pair_id="pair10",
         asset_x=AssetConfig(
             price_col="pair10_micro_gold_future_ohlcv-1m",
             display="Micro Gold",
@@ -123,9 +130,9 @@ PAIRS: Dict[str, PairConfig] = {
             tick_value=10.0,
             contract_size=100.0,
         ),
-        data_file="pair_10_cointegration_1min",
     ),
     "Silver Future vs. Micro Silver Future": PairConfig(
+        pair_id="pair11",
         asset_x=AssetConfig(
             price_col="pair11_micro_silver_future_ohlcv-1m",
             display="Micro Silver",
@@ -140,7 +147,6 @@ PAIRS: Dict[str, PairConfig] = {
             tick_value=25.0,
             contract_size=5000.0,
         ),
-        data_file="pair_11_cointegration_1min",
     ),
 }
 
@@ -158,11 +164,116 @@ def to_excel(df: pd.DataFrame) -> bytes:
     return processed_data
 
 
-def load_backtest_data(pair_cfg: PairConfig) -> pd.DataFrame:
-    df = pd.read_csv(f"data/{pair_cfg.data_file}.csv", index_col=0)
+def find_asset_file(price_col: str) -> Path:
+    preferred_names = [
+        f"{price_col}_ohlcv-1m.csv",
+        f"{price_col}_ohlcv.csv",
+        f"{price_col}.csv",
+    ]
+    for name in preferred_names:
+        candidate = DATA_DIR / name
+        if candidate.exists():
+            return candidate
+    matches = sorted(DATA_DIR.glob(f"{price_col}_*.csv"))
+    if matches:
+        return matches[0]
+    raise FileNotFoundError(
+        f"Could not find OHLCV data for {price_col}. "
+        f"Expected file like {price_col}.csv in {DATA_DIR}."
+    )
+
+
+def load_asset_ohlcv(price_col: str, candle_size: str) -> pd.DataFrame:
+    path = find_asset_file(price_col)
+    df = pd.read_csv(path, index_col=0)
     df.index = pd.to_datetime(df.index, utc=True).tz_convert(None)
     df = df.sort_index()
-    return df
+    if candle_size == "1min":
+        return df
+    agg_map = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    return df.resample(candle_size).agg(agg_map).ffill()
+
+
+def build_price_volume_frame(
+    asset_df: pd.DataFrame, price_col: str
+) -> pd.DataFrame:
+    required_cols = {"close", "volume"}
+    missing = required_cols.difference(asset_df.columns)
+    if missing:
+        raise ValueError(f"Asset data for {price_col} missing columns: {', '.join(sorted(missing))}")
+    out = asset_df[["close", "volume"]].rename(
+        columns={"close": price_col, "volume": f"{price_col}_volume"}
+    )
+    return out
+
+
+def compute_cointegration_fields(
+    pair_close: pd.DataFrame,
+    asset_x_col: str,
+    asset_y_col: str,
+    lookback: int,
+    p_threshold: float,
+) -> pd.DataFrame:
+    pair_close = pair_close.copy()
+    pair_close["cointegrated"] = 0
+    pair_close["residual"] = 0.0
+    pair_close["zscore"] = 0.0
+
+    if len(pair_close) < lookback:
+        return pair_close
+
+    lr = LinearRegression()
+    is_cointegrated = False
+
+    for i in range(lookback, len(pair_close), lookback):
+        x = pair_close[asset_x_col].iloc[i - lookback : i].values[:, None]
+        y = pair_close[asset_y_col].iloc[i - lookback : i].values[:, None]
+
+        if is_cointegrated:
+            x_new = pair_close[asset_x_col].iloc[i : i + lookback].values[:, None]
+            y_new = pair_close[asset_y_col].iloc[i : i + lookback].values[:, None]
+            spread_back = y - lr.coef_ * x
+            spread_forward = y_new - lr.coef_ * x_new
+            spread_std = spread_back.std()
+            if spread_std == 0 or np.isnan(spread_std):
+                zscore = np.zeros_like(spread_forward)
+            else:
+                zscore = (spread_forward - spread_back.mean()) / spread_std
+
+            pair_close.iloc[
+                i : i + lookback, pair_close.columns.get_loc("cointegrated")
+            ] = 1
+            pair_close.iloc[i : i + lookback, pair_close.columns.get_loc("residual")] = spread_forward
+            pair_close.iloc[i : i + lookback, pair_close.columns.get_loc("zscore")] = zscore
+
+        _, p_value, _ = coint(x, y)
+        is_cointegrated = p_value < p_threshold
+        lr.fit(x, y)
+
+    return pair_close
+
+
+def build_backtest_source_df(
+    pair_cfg: PairConfig,
+    lookback: int,
+    p_threshold: float,
+) -> pd.DataFrame:
+    asset_x_df = load_asset_ohlcv(pair_cfg.asset_x.price_col, pair_cfg.candle_size)
+    asset_y_df = load_asset_ohlcv(pair_cfg.asset_y.price_col, pair_cfg.candle_size)
+    asset_x_close = build_price_volume_frame(asset_x_df, pair_cfg.asset_x.price_col)
+    asset_y_close = build_price_volume_frame(asset_y_df, pair_cfg.asset_y.price_col)
+    pair_close = asset_x_close.join(asset_y_close, how="inner").dropna()
+    if pair_close.empty:
+        raise ValueError("No overlapping timestamps between assets; cannot run backtest.")
+    pair_close = compute_cointegration_fields(
+        pair_close,
+        pair_cfg.asset_x.price_col,
+        pair_cfg.asset_y.price_col,
+        lookback,
+        p_threshold,
+    )
+    pair_close.index = pd.to_datetime(pair_close.index)
+    return pair_close
 
 
 def ensure_naive_timestamp(value) -> pd.Timestamp:
@@ -294,27 +405,36 @@ def calculate_cash_and_margin(
     df["cash_deployed"] = df[margin_cols].sum(axis=1)
 
 
-def calculate_trade_pnls(df: pd.DataFrame, pair_cfg: PairConfig) -> list[float]:
+def identify_trades(df: pd.DataFrame, pair_cfg: PairConfig) -> list[tuple[int, int]]:
+    positions = df[pair_cfg.asset_y.position_col].fillna(0.0).to_numpy()
+    trades: list[tuple[int, int]] = []
+    in_trade = False
+    start_idx = 0
+    for idx, pos in enumerate(positions):
+        has_position = abs(pos) > 1e-9
+        if not in_trade and has_position:
+            in_trade = True
+            start_idx = idx
+        elif in_trade and not has_position:
+            trades.append((start_idx, idx))
+            in_trade = False
+    return trades
+
+
+def calculate_trade_pnls(
+    df: pd.DataFrame, pair_cfg: PairConfig, trades: list[tuple[int, int]] | None = None
+) -> list[float]:
     if df.empty:
         return []
-    pos_series = df[pair_cfg.asset_y.position_col].fillna(0.0).to_numpy()
+    trades = trades or identify_trades(df, pair_cfg)
     pnl_series = df["gross_pnl"].fillna(0.0).to_numpy()
-    states = np.where(np.abs(pos_series) > 1e-9, np.sign(pos_series), 0.0)
     trade_pnls: list[float] = []
-    current_pnl = 0.0
-    in_trade = False
-    prev_state = 0.0
-    for state, row_pnl in zip(states, pnl_series):
-        if state != prev_state:
-            if prev_state != 0.0 and in_trade:
-                trade_pnls.append(current_pnl)
-                current_pnl = 0.0
-                in_trade = False
-        if state != 0.0 and not in_trade:
-            in_trade = True
-        if in_trade:
-            current_pnl += row_pnl
-        prev_state = state
+    for start_idx, end_idx in trades:
+        start_idx = max(start_idx, 0)
+        end_idx = min(end_idx, len(pnl_series))
+        if start_idx >= end_idx:
+            continue
+        trade_pnls.append(float(pnl_series[start_idx:end_idx].sum()))
     return trade_pnls
 
 
@@ -343,10 +463,11 @@ def compute_performance_metrics(
             "win_rate": 0.0,
         }
 
-    trades = calculate_trade_pnls(df, pair_cfg)
+    trades = identify_trades(df, pair_cfg)
+    trade_pnls = calculate_trade_pnls(df, pair_cfg, trades)
     trade_count = len(trades)
     win_rate = (
-        sum(1 for pnl in trades if pnl > 0.0) / trade_count if trade_count > 0 else 0.0
+        sum(1 for pnl in trade_pnls if pnl > 0.0) / trade_count if trade_count > 0 else 0.0
     )
     gross_pnl_series = df["gross_pnl"]
     pnl_cumsum = gross_pnl_series.cumsum()
@@ -374,75 +495,68 @@ def compute_performance_metrics(
 def build_blotter(df: pd.DataFrame, pair_cfg: PairConfig) -> pd.DataFrame:
     asset_x = pair_cfg.asset_x
     asset_y = pair_cfg.asset_y
-    base_cols = [
-        asset_x.price_col,
-        asset_y.price_col,
-        asset_x.position_col,
-        asset_y.position_col,
-        "gross_pnl",
-    ]
     blotter_columns = ["trade_id", "timestamp", "action", "asset", "quantity", "price", "status"]
-    if df.empty:
+    trades = identify_trades(df, pair_cfg)
+    if not trades:
         return pd.DataFrame(columns=blotter_columns)
 
-    blotter_raw_df = df[base_cols].copy()
-    blotter_raw_df["status"] = np.where(
-        blotter_raw_df[asset_x.position_col] != 0,
-        "ENTRY",
-        "NO ACTION",
-    )
-
-    trade_id = 1
     records = []
-    for i in range(len(blotter_raw_df) - 1):
-        row = blotter_raw_df.iloc[i]
-        next_row = blotter_raw_df.iloc[i + 1] if i + 1 < len(blotter_raw_df) else None
-
-        if row.status != "ENTRY":
+    for trade_num, (start_idx, end_idx) in enumerate(trades, start=1):
+        if start_idx >= len(df) or end_idx >= len(df):
+            continue
+        entry_row = df.iloc[start_idx]
+        exit_row = df.iloc[end_idx]
+        qty_x = entry_row[asset_x.position_col]
+        qty_y = entry_row[asset_y.position_col]
+        if qty_x == 0 or qty_y == 0:
             continue
 
-        record1 = {
-            "trade_id": trade_id,
-            "timestamp": row.name,
-            "action": "BUY" if row[asset_x.position_col] > 0 else "SHORT",
-            "asset": asset_x.display.upper(),
-            "quantity": row[asset_x.position_col],
-            "price": row[asset_x.price_col],
-            "status": "ENTRY",
-        }
-        record2 = {
-            "trade_id": trade_id,
-            "timestamp": row.name,
-            "action": "BUY" if row[asset_y.position_col] > 0 else "SHORT",
-            "asset": asset_y.display.upper(),
-            "quantity": row[asset_y.position_col],
-            "price": row[asset_y.price_col],
-            "status": "ENTRY",
-        }
-        record3 = {
-            "trade_id": trade_id,
-            "timestamp": next_row.name if next_row is not None else None,
-            "action": "SELL" if row[asset_x.position_col] > 0 else "COVER",
-            "quantity": -row[asset_x.position_col],
-            "asset": asset_x.display.upper(),
-            "price": next_row[asset_x.price_col] if next_row is not None else None,
-            "status": "EXIT",
-        }
-        record4 = {
-            "trade_id": trade_id,
-            "timestamp": next_row.name if next_row is not None else None,
-            "action": "SELL" if row[asset_y.position_col] > 0 else "COVER",
-            "quantity": -row[asset_y.position_col],
-            "asset": asset_y.display.upper(),
-            "price": next_row[asset_y.price_col] if next_row is not None else None,
-            "status": "EXIT",
-        }
-        records.extend([record1, record2, record3, record4])
-        trade_id += 1
+        records.append(
+            {
+                "trade_id": trade_num,
+                "timestamp": entry_row.name,
+                "action": "BUY" if qty_x > 0 else "SHORT",
+                "asset": asset_x.display.upper(),
+                "quantity": qty_x,
+                "price": entry_row[asset_x.price_col],
+                "status": "ENTRY",
+            }
+        )
+        records.append(
+            {
+                "trade_id": trade_num,
+                "timestamp": entry_row.name,
+                "action": "BUY" if qty_y > 0 else "SHORT",
+                "asset": asset_y.display.upper(),
+                "quantity": qty_y,
+                "price": entry_row[asset_y.price_col],
+                "status": "ENTRY",
+            }
+        )
+        records.append(
+            {
+                "trade_id": trade_num,
+                "timestamp": exit_row.name,
+                "action": "SELL" if qty_x > 0 else "COVER",
+                "asset": asset_x.display.upper(),
+                "quantity": -qty_x,
+                "price": exit_row[asset_x.price_col],
+                "status": "EXIT",
+            }
+        )
+        records.append(
+            {
+                "trade_id": trade_num,
+                "timestamp": exit_row.name,
+                "action": "SELL" if qty_y > 0 else "COVER",
+                "asset": asset_y.display.upper(),
+                "quantity": -qty_y,
+                "price": exit_row[asset_y.price_col],
+                "status": "EXIT",
+            }
+        )
 
     blotter_df = pd.DataFrame.from_records(records, columns=blotter_columns)
-    if blotter_df.empty:
-        return blotter_df
     blotter_df["trade_id"] = blotter_df["trade_id"].astype(str)
     return blotter_df
 
@@ -451,6 +565,21 @@ def main() -> None:
     st.sidebar.header("Backtest Controls")
     pair_name = st.sidebar.selectbox("Select Pair", list(PAIRS.keys()))
     pair_cfg = PAIRS[pair_name]
+    lookback = st.sidebar.number_input(
+        "Cointegration Lookback (bars)",
+        min_value=20,
+        max_value=2000,
+        value=DEFAULT_COINTEGRATION_LOOKBACK,
+        step=10,
+    )
+    p_threshold = st.sidebar.number_input(
+        "Cointegration p-value threshold",
+        min_value=0.001,
+        max_value=0.5,
+        value=float(DEFAULT_COINTEGRATION_P_THRESHOLD),
+        step=0.01,
+        format="%.3f",
+    )
 
     slider_min = float(DEFAULT_ENTRY_THRESHOLD)
     slider_max = float(max(slider_min + 0.1, 10.0))
@@ -479,7 +608,11 @@ def main() -> None:
         num_contracts=DEFAULT_NUM_CONTRACTS,
     )
 
-    raw_df = load_backtest_data(pair_cfg)
+    try:
+        raw_df = build_backtest_source_df(pair_cfg, int(lookback), float(p_threshold))
+    except (FileNotFoundError, ValueError) as exc:
+        st.error(str(exc))
+        st.stop()
     start_date, end_date = select_date_range(raw_df)
     bt_df = run_backtest(raw_df, pair_cfg, params)
     selected_df = filter_df_by_dates(bt_df, start_date, end_date)
