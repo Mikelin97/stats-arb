@@ -54,9 +54,9 @@ class BacktestParams:
 DEFAULT_ENTRY_THRESHOLD = 1.5
 DEFAULT_EXIT_THRESHOLD = 0.5
 DEFAULT_INITIAL_MARGIN = 0.1
-DEFAULT_MAX_VOLUME_TAKE_RATE = 0.1
+DEFAULT_MAX_VOLUME_TAKE_RATE = 0.2
 DEFAULT_NUM_CONTRACTS = 1
-DEFAULT_STOP_ENTRY_THRESHOLD = 4.0
+DEFAULT_STOP_ENTRY_THRESHOLD = 3.0
 AVG_TRADING_HOURS = 6.5
 DEFAULT_COINTEGRATION_LOOKBACK = 100
 DEFAULT_COINTEGRATION_P_THRESHOLD = 0.05
@@ -78,23 +78,6 @@ PAIRS: Dict[str, PairConfig] = {
             tick_size=0.01,
             tick_value=10.0,
             contract_size=1000.0,
-        ),
-    ),
-    "NatGas HH vs. NatGas LS": PairConfig(
-        pair_id="pair6",
-        asset_x=AssetConfig(
-            price_col="pair6_natgas_hh_future_ohlcv-1m",
-            display="Henry Hub NG",
-            tick_size=0.001,
-            tick_value=10.0,
-            contract_size=10000.0,
-        ),
-        asset_y=AssetConfig(
-            price_col="pair6_natgas_ls_future_ohlcv-1m",
-            display="Louisiana NG",
-            tick_size=0.001,
-            tick_value=10.0,
-            contract_size=10000.0,
         ),
     ),
     "MSTR vs. IBIT": PairConfig(
@@ -344,10 +327,15 @@ def apply_trading_logic(
     df[f"{asset_y.price_col}_max_volume"] = np.floor(
         df[asset_y.volume_col] * params.max_volume_take_rate
     )
-    max_volume = np.minimum(
+    entry_volume = np.minimum(
         df[f"{asset_x.price_col}_max_volume"],
         df[f"{asset_y.price_col}_max_volume"],
-    ).fillna(0.0)
+    )
+    exit_volume = np.minimum(
+        df[f"{asset_x.price_col}_max_volume"].shift(-1),
+        df[f"{asset_y.price_col}_max_volume"].shift(-1),
+    )
+    tradable_volume = np.minimum(entry_volume, exit_volume).fillna(0.0)
 
     zscores = df["zscore"]
     if np.isinf(params.stop_entry_threshold):
@@ -372,7 +360,7 @@ def apply_trading_logic(
         params.num_contracts,
     )
 
-    df[asset_y.position_col] = df[asset_y.position_col] * max_volume
+    df[asset_y.position_col] = df[asset_y.position_col] * tradable_volume
     df[asset_x.position_col] = -df[asset_y.position_col]
 
     return df
@@ -408,16 +396,9 @@ def calculate_cash_and_margin(
 def identify_trades(df: pd.DataFrame, pair_cfg: PairConfig) -> list[tuple[int, int]]:
     positions = df[pair_cfg.asset_y.position_col].fillna(0.0).to_numpy()
     trades: list[tuple[int, int]] = []
-    in_trade = False
-    start_idx = 0
-    for idx, pos in enumerate(positions):
-        has_position = abs(pos) > 1e-9
-        if not in_trade and has_position:
-            in_trade = True
-            start_idx = idx
-        elif in_trade and not has_position:
-            trades.append((start_idx, idx))
-            in_trade = False
+    for idx in range(len(positions) - 1):
+        if abs(positions[idx]) > 1e-9:
+            trades.append((idx, idx + 1))
     return trades
 
 
@@ -730,7 +711,7 @@ def main() -> None:
     st.sidebar.download_button(
         label="Download Blotter as Excel",
         data=df_xlsx,
-        file_name="blotter.xlsx",
+        file_name=f"blotter_{pair_name}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
