@@ -99,6 +99,23 @@ PAIRS: Dict[str, PairConfig] = {
             contract_size=1000.0,
         ),
     ),
+    "HH Gas Future vs. LS Gas Future": PairConfig(
+        pair_id="pair6",
+        asset_x=AssetConfig(
+            price_col="pair6_natgas_hh_future_ohlcv-1m",
+            display="HH Gas Future",
+            tick_size=0.001,
+            tick_value=10.0,
+            contract_size=10000.0,
+        ),
+        asset_y=AssetConfig(
+            price_col="pair6_natgas_ls_future_ohlcv-1m",
+            display="LS Gas Future",
+            tick_size=0.25,
+            tick_value=25.0,
+            contract_size=100.0,
+        ),
+    ),
     "MSTR vs. IBIT": PairConfig(
         pair_id="pair7",
         asset_x=AssetConfig(
@@ -111,6 +128,23 @@ PAIRS: Dict[str, PairConfig] = {
         asset_y=AssetConfig(
             price_col="pair7_ibit_etf_ohlcv-1m",
             display="IBIT ETF",
+            tick_size=0.01,
+            tick_value=1.0,
+            contract_size=1.0,
+        ),
+    ),
+    "ADI vs. TXN": PairConfig(
+        pair_id="pair8",
+        asset_x=AssetConfig(
+            price_col="pair8_adi_spot_ohlcv-1m",
+            display="ADI",
+            tick_size=0.01,
+            tick_value=1.0,
+            contract_size=1.0,
+        ),
+        asset_y=AssetConfig(
+            price_col="pair8_txn_spot_ohlcv-1m",
+            display="TXN",
             tick_size=0.01,
             tick_value=1.0,
             contract_size=1.0,

@@ -55,10 +55,10 @@ PAIR_CONFIGS: Dict[str, PairRequest] = {
     ),
     "pair4": PairRequest(
         identifier="pair4",
-        description="Corn Future vs. Soybean Oil Future",
+        description="Corn Future vs. Soybean Future",
         assets={
             "corn_future": AssetRequest(dataset="GLBX.MDP3", symbol="ZCZ5"),
-            "soybean_oil_future": AssetRequest(dataset="GLBX.MDP3", symbol="ZLZ5"),
+            "soybean_future": AssetRequest(dataset="GLBX.MDP3", symbol="ZSF6"),
         },
     ),
     "pair5": PairRequest(
