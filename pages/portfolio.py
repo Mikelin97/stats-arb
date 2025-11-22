@@ -3,6 +3,7 @@ import pandas as pd
 import streamlit as st
 
 from backtest import (
+    ALL_WEEKS_LABEL,
     DEFAULT_STOP_ENTRY_THRESHOLD,
     PAIRS,
     BacktestParams,
@@ -14,6 +15,8 @@ from backtest import (
     DEFAULT_INITIAL_MARGIN,
     DEFAULT_MAX_VOLUME_TAKE_RATE,
     DEFAULT_NUM_CONTRACTS,
+    list_available_weeks,
+    resolve_data_directories,
     build_backtest_source_df,
     run_backtest,
     filter_df_by_dates,
@@ -88,6 +91,15 @@ def aggregate_portfolio_metrics(
 
 def main():
     st.sidebar.header("Portfolio Controls")
+    available_weeks = list_available_weeks()
+    data_options = [ALL_WEEKS_LABEL]
+    data_options.extend(available_weeks)
+    default_source_idx = len(data_options) - 1 if available_weeks else 0
+    data_source = st.sidebar.selectbox(
+        "Data Source (week or full period)", data_options, index=default_source_idx
+    )
+    data_dirs = resolve_data_directories(data_source, available_weeks)
+    st.sidebar.caption(f"Using data from: {', '.join(str(p) for p in data_dirs)}")
     available_pairs = list(PAIRS.keys())
     selected_pairs = st.sidebar.multiselect(
         "Select Pairs to Include", available_pairs, default=available_pairs
@@ -143,7 +155,9 @@ def main():
     for pair_name in selected_pairs:
         pair_cfg = PAIRS[pair_name]
         try:
-            source_df = build_backtest_source_df(pair_cfg, int(lookback), float(p_threshold))
+            source_df = build_backtest_source_df(
+                pair_cfg, int(lookback), float(p_threshold), data_dirs=data_dirs
+            )
         except (FileNotFoundError, ValueError) as exc:
             st.warning(f"{pair_name}: {exc}")
             continue

@@ -12,6 +12,25 @@ from statsmodels.tsa.stattools import coint
 import streamlit as st
 
 DATA_DIR = Path("data")
+ALL_WEEKS_LABEL = "All Weeks (full period)"
+
+
+def list_available_weeks(data_root: Path = DATA_DIR) -> list[str]:
+    if not data_root.exists():
+        return []
+    return sorted(
+        p.name for p in data_root.iterdir() if p.is_dir() and p.name.lower().startswith("week")
+    )
+
+
+def resolve_data_directories(
+    selected_source: str, available_weeks: list[str], data_root: Path = DATA_DIR
+) -> list[Path]:
+    if selected_source == ALL_WEEKS_LABEL and available_weeks:
+        return [data_root / week for week in available_weeks]
+    if selected_source in available_weeks:
+        return [data_root / selected_source]
+    return [data_root]
 @dataclass(frozen=True)
 class AssetConfig:
     price_col: str
@@ -147,30 +166,42 @@ def to_excel(df: pd.DataFrame) -> bytes:
     return processed_data
 
 
-def find_asset_file(price_col: str) -> Path:
+def find_asset_file(price_col: str, data_dir: Path) -> Path:
     preferred_names = [
         f"{price_col}_ohlcv-1m.csv",
         f"{price_col}_ohlcv.csv",
         f"{price_col}.csv",
     ]
     for name in preferred_names:
-        candidate = DATA_DIR / name
+        candidate = data_dir / name
         if candidate.exists():
             return candidate
-    matches = sorted(DATA_DIR.glob(f"{price_col}_*.csv"))
+    matches = sorted(data_dir.glob(f"{price_col}_*.csv"))
     if matches:
         return matches[0]
     raise FileNotFoundError(
         f"Could not find OHLCV data for {price_col}. "
-        f"Expected file like {price_col}.csv in {DATA_DIR}."
+        f"Expected file like {price_col}.csv in {data_dir}."
     )
 
 
-def load_asset_ohlcv(price_col: str, candle_size: str) -> pd.DataFrame:
-    path = find_asset_file(price_col)
-    df = pd.read_csv(path, index_col=0)
-    df.index = pd.to_datetime(df.index, utc=True).tz_convert(None)
-    df = df.sort_index()
+def load_asset_ohlcv(price_col: str, candle_size: str, data_dirs: list[Path]) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    for directory in data_dirs:
+        try:
+            path = find_asset_file(price_col, directory)
+        except FileNotFoundError:
+            continue
+        df = pd.read_csv(path, index_col=0)
+        df.index = pd.to_datetime(df.index, utc=True).tz_convert(None)
+        frames.append(df.sort_index())
+    if not frames:
+        searched_locations = ", ".join(str(d) for d in data_dirs) if data_dirs else str(DATA_DIR)
+        raise FileNotFoundError(
+            f"Could not find OHLCV data for {price_col} in {searched_locations}."
+        )
+    df = pd.concat(frames).sort_index()
+    df = df.loc[~df.index.duplicated(keep="first")]
     if candle_size == "1min":
         return df
     agg_map = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
@@ -205,33 +236,43 @@ def compute_cointegration_fields(
     if len(pair_close) < lookback:
         return pair_close
 
-    lr = LinearRegression()
-    is_cointegrated = False
+    # Reset cointegration learning at large gaps (e.g., week boundaries) so periods act independently.
+    idx = pd.to_datetime(pair_close.index)
+    gap_threshold = pd.Timedelta(hours=24)
+    gaps = pd.Series(idx).diff() > gap_threshold
+    segment_starts = [0] + (np.flatnonzero(gaps.to_numpy()).tolist())
+    segment_bounds = segment_starts + [len(pair_close)]
 
-    for i in range(lookback, len(pair_close), lookback):
-        x = pair_close[asset_x_col].iloc[i - lookback : i].values[:, None]
-        y = pair_close[asset_y_col].iloc[i - lookback : i].values[:, None]
+    for seg_start, seg_end in zip(segment_bounds[:-1], segment_bounds[1:]):
+        if seg_end - seg_start < lookback:
+            continue
+        lr = LinearRegression()
+        is_cointegrated = False
+        for i in range(seg_start + lookback, seg_end, lookback):
+            x = pair_close[asset_x_col].iloc[i - lookback : i].values[:, None]
+            y = pair_close[asset_y_col].iloc[i - lookback : i].values[:, None]
 
-        if is_cointegrated:
-            x_new = pair_close[asset_x_col].iloc[i : i + lookback].values[:, None]
-            y_new = pair_close[asset_y_col].iloc[i : i + lookback].values[:, None]
-            spread_back = y - lr.coef_ * x
-            spread_forward = y_new - lr.coef_ * x_new
-            spread_std = spread_back.std()
-            if spread_std == 0 or np.isnan(spread_std):
-                zscore = np.zeros_like(spread_forward)
-            else:
-                zscore = (spread_forward - spread_back.mean()) / spread_std
+            if is_cointegrated:
+                window_end = min(i + lookback, seg_end)
+                x_new = pair_close[asset_x_col].iloc[i:window_end].values[:, None]
+                y_new = pair_close[asset_y_col].iloc[i:window_end].values[:, None]
+                spread_back = y - lr.coef_ * x
+                spread_forward = y_new - lr.coef_ * x_new
+                spread_std = spread_back.std()
+                if spread_std == 0 or np.isnan(spread_std):
+                    zscore = np.zeros_like(spread_forward)
+                else:
+                    zscore = (spread_forward - spread_back.mean()) / spread_std
 
-            pair_close.iloc[
-                i : i + lookback, pair_close.columns.get_loc("cointegrated")
-            ] = 1
-            pair_close.iloc[i : i + lookback, pair_close.columns.get_loc("residual")] = spread_forward
-            pair_close.iloc[i : i + lookback, pair_close.columns.get_loc("zscore")] = zscore
+                pair_close.iloc[
+                    i:window_end, pair_close.columns.get_loc("cointegrated")
+                ] = 1
+                pair_close.iloc[i:window_end, pair_close.columns.get_loc("residual")] = spread_forward
+                pair_close.iloc[i:window_end, pair_close.columns.get_loc("zscore")] = zscore
 
-        _, p_value, _ = coint(x, y)
-        is_cointegrated = p_value < p_threshold
-        lr.fit(x, y)
+            _, p_value, _ = coint(x, y)
+            is_cointegrated = p_value < p_threshold
+            lr.fit(x, y)
 
     return pair_close
 
@@ -240,9 +281,11 @@ def build_backtest_source_df(
     pair_cfg: PairConfig,
     lookback: int,
     p_threshold: float,
+    data_dirs: list[Path] | None = None,
 ) -> pd.DataFrame:
-    asset_x_df = load_asset_ohlcv(pair_cfg.asset_x.price_col, pair_cfg.candle_size)
-    asset_y_df = load_asset_ohlcv(pair_cfg.asset_y.price_col, pair_cfg.candle_size)
+    data_dirs = data_dirs or [DATA_DIR]
+    asset_x_df = load_asset_ohlcv(pair_cfg.asset_x.price_col, pair_cfg.candle_size, data_dirs)
+    asset_y_df = load_asset_ohlcv(pair_cfg.asset_y.price_col, pair_cfg.candle_size, data_dirs)
     asset_x_close = build_price_volume_frame(asset_x_df, pair_cfg.asset_x.price_col)
     asset_y_close = build_price_volume_frame(asset_y_df, pair_cfg.asset_y.price_col)
     pair_close = asset_x_close.join(asset_y_close, how="inner").dropna()
@@ -544,6 +587,15 @@ def build_blotter(df: pd.DataFrame, pair_cfg: PairConfig) -> pd.DataFrame:
 
 def main() -> None:
     st.sidebar.header("Backtest Controls")
+    available_weeks = list_available_weeks()
+    data_options = [ALL_WEEKS_LABEL]
+    data_options.extend(available_weeks)
+    default_source_idx = len(data_options) - 1 if available_weeks else 0
+    data_source = st.sidebar.selectbox(
+        "Data Source (week or full period)", data_options, index=default_source_idx
+    )
+    data_dirs = resolve_data_directories(data_source, available_weeks)
+    st.sidebar.caption(f"Using data from: {', '.join(str(p) for p in data_dirs)}")
     pair_name = st.sidebar.selectbox("Select Pair", list(PAIRS.keys()))
     pair_cfg = PAIRS[pair_name]
     lookback = st.sidebar.number_input(
@@ -590,7 +642,9 @@ def main() -> None:
     )
 
     try:
-        raw_df = build_backtest_source_df(pair_cfg, int(lookback), float(p_threshold))
+        raw_df = build_backtest_source_df(
+            pair_cfg, int(lookback), float(p_threshold), data_dirs=data_dirs
+        )
     except (FileNotFoundError, ValueError) as exc:
         st.error(str(exc))
         st.stop()
