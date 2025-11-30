@@ -7,6 +7,7 @@ from backtest import (
     DEFAULT_STOP_ENTRY_THRESHOLD,
     PAIRS,
     BacktestParams,
+    PairConfig,
     AVG_TRADING_HOURS,
     DEFAULT_COINTEGRATION_LOOKBACK,
     DEFAULT_COINTEGRATION_P_THRESHOLD,
@@ -108,6 +109,45 @@ def main():
         st.warning("Select at least one pair to build the portfolio.")
         st.stop()
 
+    entry_thresholds: dict[str, float] = {}
+    with st.sidebar.expander("Entry Thresholds per Pair", expanded=True):
+        for pair_name in selected_pairs:
+            pair_cfg = PAIRS[pair_name]
+            entry_thresholds[pair_name] = st.number_input(
+                f"{pair_name} Entry Z-Score",
+                min_value=0.1,
+                max_value=10.0,
+                value=float(DEFAULT_ENTRY_THRESHOLD),
+                step=0.1,
+                key=f"entry-threshold-{pair_cfg.pair_id}",
+            )
+
+    stop_entry_threshold_default = st.sidebar.slider(
+        "Max Entry Z-Score (stop new entries beyond this)",
+        min_value=float(DEFAULT_ENTRY_THRESHOLD),
+        max_value=10.0,
+        value=float(DEFAULT_STOP_ENTRY_THRESHOLD),
+        step=0.1,
+        help="Blocks new trades if |z-score| exceeds this risk guardrail.",
+    )
+
+    stop_entry_thresholds: dict[str, float] = {}
+    with st.sidebar.expander("Max Entry Z-Score per Pair", expanded=False):
+        for pair_name in selected_pairs:
+            pair_cfg = PAIRS[pair_name]
+            slider_min = float(entry_thresholds.get(pair_name, DEFAULT_ENTRY_THRESHOLD))
+            slider_max = 10.0
+            default_val = float(stop_entry_threshold_default)
+            default_val = max(slider_min, min(default_val, slider_max))
+            stop_entry_thresholds[pair_name] = st.number_input(
+                f"{pair_name} Max Entry Z-Score",
+                min_value=slider_min,
+                max_value=slider_max,
+                value=default_val,
+                step=0.1,
+                key=f"stop-entry-threshold-{pair_cfg.pair_id}",
+            )
+
     lookback = st.sidebar.number_input(
         "Cointegration Lookback (bars)",
         min_value=20,
@@ -123,13 +163,6 @@ def main():
         step=0.01,
         format="%.3f",
     )
-    stop_entry_threshold = st.sidebar.slider(
-        "Max Entry Z-Score",
-        min_value=float(DEFAULT_ENTRY_THRESHOLD),
-        max_value=10.0,
-        value=float(DEFAULT_STOP_ENTRY_THRESHOLD),
-        step=0.1,
-    )
     safety_margin_multiple = st.sidebar.number_input(
         "Safety Margin Multiple", min_value=1.0, max_value=5.0, value=SAFETY_MARGIN_DEFAULT, step=0.1
     )
@@ -140,10 +173,10 @@ def main():
         step=10000.0,
     )
 
-    params = BacktestParams(
+    base_params = BacktestParams(
         entry_threshold=DEFAULT_ENTRY_THRESHOLD,
         exit_threshold=DEFAULT_EXIT_THRESHOLD,
-        stop_entry_threshold=stop_entry_threshold,
+        stop_entry_threshold=stop_entry_threshold_default,
         initial_margin=DEFAULT_INITIAL_MARGIN,
         max_volume_take_rate=DEFAULT_MAX_VOLUME_TAKE_RATE,
         num_contracts=DEFAULT_NUM_CONTRACTS,
@@ -154,6 +187,18 @@ def main():
     max_dates = []
     for pair_name in selected_pairs:
         pair_cfg = PAIRS[pair_name]
+        pair_entry_threshold = float(entry_thresholds.get(pair_name, DEFAULT_ENTRY_THRESHOLD))
+        pair_stop_entry_threshold = float(
+            stop_entry_thresholds.get(pair_name, base_params.stop_entry_threshold)
+        )
+        pair_params = BacktestParams(
+            entry_threshold=pair_entry_threshold,
+            exit_threshold=base_params.exit_threshold,
+            stop_entry_threshold=pair_stop_entry_threshold,
+            initial_margin=base_params.initial_margin,
+            max_volume_take_rate=base_params.max_volume_take_rate,
+            num_contracts=base_params.num_contracts,
+        )
         try:
             source_df = build_backtest_source_df(
                 pair_cfg, int(lookback), float(p_threshold), data_dirs=data_dirs
@@ -161,7 +206,7 @@ def main():
         except (FileNotFoundError, ValueError) as exc:
             st.warning(f"{pair_name}: {exc}")
             continue
-        bt_df = run_backtest(source_df, pair_cfg, params)
+        bt_df = run_backtest(source_df, pair_cfg, pair_params)
         if bt_df.empty:
             continue
         pair_results[pair_name] = bt_df
@@ -210,27 +255,58 @@ def main():
         format="%.4f",
     )
 
+    active_pairs: list[tuple[str, PairConfig, pd.DataFrame]] = []
+    for pair_name, bt_df in pair_results.items():
+        selected_df = filter_df_by_dates(bt_df, start_date, end_date)
+        if selected_df.empty:
+            continue
+        active_pairs.append((pair_name, PAIRS[pair_name], selected_df))
+
+    if not active_pairs:
+        st.error("No trades found within the selected date range.")
+        st.stop()
+
+    pair_capital_cap = portfolio_capital / (len(active_pairs) + 1)
+    st.caption(
+        f"Equal-weight capital cap per bucket: ${pair_capital_cap:,.0f} "
+        f"(n={len(active_pairs)} pairs + money market + benchmark)."
+    )
+
     pair_rows = []
     portfolio_series = []
     all_trade_pnls: list[float] = []
     total_reserved_capital = 0.0
 
-    for pair_name, bt_df in pair_results.items():
-        pair_cfg = PAIRS[pair_name]
-        selected_df = filter_df_by_dates(bt_df, start_date, end_date)
-        if selected_df.empty:
-            continue
-        metrics = compute_performance_metrics(selected_df, pair_cfg)
-        max_drawdown = calculate_max_drawdown(selected_df["gross_pnl"])
-        safe_capital = float(
+    for pair_name, pair_cfg, selected_df in active_pairs:
+        pair_entry_threshold = float(entry_thresholds.get(pair_name, DEFAULT_ENTRY_THRESHOLD))
+        pair_stop_entry_threshold = float(
+            stop_entry_thresholds.get(pair_name, base_params.stop_entry_threshold)
+        )
+        safe_capital_base = float(
             selected_df["cash_deployed"].max() * safety_margin_multiple
             if not selected_df["cash_deployed"].empty
             else 0.0
         )
-        total_reserved_capital += safe_capital
-        trades = identify_trades(selected_df, pair_cfg)
-        trade_pnls = calculate_trade_pnls(selected_df, pair_cfg, trades)
+        if pair_capital_cap <= 0:
+            scaling_factor = 0.0
+        elif safe_capital_base > 0:
+            scaling_factor = min(1.0, pair_capital_cap / safe_capital_base)
+        else:
+            scaling_factor = 1.0
+
+        scaled_df = selected_df.copy()
+        scaled_df["gross_pnl"] = scaled_df["gross_pnl"] * scaling_factor
+        scaled_df["cash_deployed"] = scaled_df["cash_deployed"] * scaling_factor
+
+        safe_capital_reserved = safe_capital_base * scaling_factor
+        total_reserved_capital += safe_capital_reserved
+
+        metrics = compute_performance_metrics(scaled_df, pair_cfg)
+        max_drawdown = calculate_max_drawdown(scaled_df["gross_pnl"])
+        trades = identify_trades(scaled_df, pair_cfg)
+        trade_pnls = calculate_trade_pnls(scaled_df, pair_cfg, trades)
         all_trade_pnls.extend(trade_pnls)
+
         pair_rows.append(
             {
                 "Pair": pair_name,
@@ -239,14 +315,12 @@ def main():
                 "Annualized Sharpe": metrics["sharpe_ratio"],
                 "Max Drawdown": max_drawdown,
                 "Win Rate": metrics["win_rate"],
-                "Safe Capital Reserved": safe_capital,
+                "Capital Used (capped)": safe_capital_reserved,
+                "Entry Threshold": pair_entry_threshold,
+                "Max Entry Z-Score": pair_stop_entry_threshold,
             }
         )
-        portfolio_series.append(selected_df["gross_pnl"].rename(pair_name))
-
-    if not pair_rows:
-        st.error("No trades found within the selected date range.")
-        st.stop()
+        portfolio_series.append(scaled_df["gross_pnl"].rename(pair_name))
 
     pair_table = pd.DataFrame(pair_rows)
     st.subheader("Pair-Level Summary")
@@ -257,18 +331,24 @@ def main():
                 "Annualized Sharpe": "{:.2f}",
                 "Max Drawdown": "${:,.0f}",
                 "Win Rate": "{:.2%}",
-                "Safe Capital Reserved": "${:,.0f}",
+                "Entry Threshold": "{:.2f}",
+                "Max Entry Z-Score": "{:.2f}",
+                "Cap per Pair": "${:,.0f}",
+                "Capital Used (capped)": "${:,.0f}",
             }
         ),
         use_container_width=True,
     )
 
-    remaining_capital = max(portfolio_capital - total_reserved_capital, 0.0)
-    money_market_buffer = remaining_capital * 0.5
-    benchmark_allocation = remaining_capital - money_market_buffer
+    money_market_allocation = max(pair_capital_cap, 0.0)
+    benchmark_allocation = max(pair_capital_cap, 0.0)
+    used_capital = total_reserved_capital + money_market_allocation + benchmark_allocation
+    cash_held = max(portfolio_capital - used_capital, 0.0)
+
     st.caption(f"Total Safe Capital Reserved: ${total_reserved_capital:,.0f}")
-    st.caption(f"Money Market Allocation: ${money_market_buffer:,.0f}")
+    st.caption(f"Money Market Allocation: ${money_market_allocation:,.0f}")
     st.caption(f"Benchmark Allocation: ${benchmark_allocation:,.0f}")
+    st.caption(f"Unallocated Cash Held: ${cash_held:,.0f}")
 
     portfolio_df = pd.concat(portfolio_series, axis=1).fillna(0.0).sort_index()
     portfolio_pnl = portfolio_df.sum(axis=1)
@@ -279,7 +359,7 @@ def main():
         portfolio_pnl,
         all_trade_pnls,
         portfolio_capital,
-        money_market_buffer,
+        money_market_allocation,
         benchmark_allocation,
         years,
         money_market_rate,

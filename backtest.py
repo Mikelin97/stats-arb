@@ -76,6 +76,7 @@ DEFAULT_INITIAL_MARGIN = 0.1
 DEFAULT_MAX_VOLUME_TAKE_RATE = 0.2
 DEFAULT_NUM_CONTRACTS = 1
 DEFAULT_STOP_ENTRY_THRESHOLD = 3.0
+DEFAULT_SAFETY_MARGIN = 1.5
 AVG_TRADING_HOURS = 6.5
 DEFAULT_COINTEGRATION_LOOKBACK = 100
 DEFAULT_COINTEGRATION_P_THRESHOLD = 0.05
@@ -97,23 +98,6 @@ PAIRS: Dict[str, PairConfig] = {
             tick_size=0.01,
             tick_value=10.0,
             contract_size=1000.0,
-        ),
-    ),
-    "HH Gas Future vs. LS Gas Future": PairConfig(
-        pair_id="pair6",
-        asset_x=AssetConfig(
-            price_col="pair6_natgas_hh_future_ohlcv-1m",
-            display="HH Gas Future",
-            tick_size=0.001,
-            tick_value=10.0,
-            contract_size=10000.0,
-        ),
-        asset_y=AssetConfig(
-            price_col="pair6_natgas_ls_future_ohlcv-1m",
-            display="LS Gas Future",
-            tick_size=0.25,
-            tick_value=25.0,
-            contract_size=100.0,
         ),
     ),
     "MSTR vs. IBIT": PairConfig(
@@ -181,6 +165,23 @@ PAIRS: Dict[str, PairConfig] = {
             display="Silver Future",
             tick_size=0.005,
             tick_value=25.0,
+            contract_size=5000.0,
+        ),
+    ),
+    "HRW Wheat Future vs. SRW Wheat Future": PairConfig(
+        pair_id="pair12",
+        asset_x=AssetConfig(
+            price_col="pair12_srw_wheat_future_ohlcv-1m",
+            display="SRW Wheat Future",
+            tick_size=0.0025,
+            tick_value=12.5,
+            contract_size=5000.0,
+        ),
+        asset_y=AssetConfig(
+            price_col="pair12_hrw_wheat_future_ohlcv-1m",
+            display="HRW Wheat Future",
+            tick_size=0.0025,
+            tick_value=12.5,
             contract_size=5000.0,
         ),
     ),
@@ -648,7 +649,16 @@ def main() -> None:
         format="%.3f",
     )
 
-    slider_min = float(DEFAULT_ENTRY_THRESHOLD)
+    entry_threshold = st.sidebar.number_input(
+        "Entry Z-Score",
+        min_value=0.1,
+        max_value=10.0,
+        value=float(DEFAULT_ENTRY_THRESHOLD),
+        step=0.1,
+        format="%.2f",
+    )
+
+    slider_min = float(entry_threshold)
     slider_max = float(max(slider_min + 0.1, 10.0))
     slider_default = DEFAULT_STOP_ENTRY_THRESHOLD
     if slider_default is None or not np.isfinite(slider_default):
@@ -667,7 +677,7 @@ def main() -> None:
         stop_entry_threshold = float("inf")
 
     params = BacktestParams(
-        entry_threshold=DEFAULT_ENTRY_THRESHOLD,
+        entry_threshold=float(entry_threshold),
         exit_threshold=DEFAULT_EXIT_THRESHOLD,
         stop_entry_threshold=stop_entry_threshold,
         initial_margin=DEFAULT_INITIAL_MARGIN,
@@ -685,6 +695,59 @@ def main() -> None:
     start_date, end_date = select_date_range(raw_df)
     bt_df = run_backtest(raw_df, pair_cfg, params)
     selected_df = filter_df_by_dates(bt_df, start_date, end_date)
+    if selected_df.empty:
+        st.warning("No data available in the selected date range.")
+        st.stop()
+
+    apply_cap = st.sidebar.checkbox("Apply Capital Cap to Trades", value=False)
+    cap_amount = 0.0
+    safety_margin_multiple = DEFAULT_SAFETY_MARGIN
+    scaling_factor = 1.0
+    required_capital = float(
+        selected_df["cash_deployed"].max()
+        if not selected_df["cash_deployed"].empty
+        else 0.0
+    )
+    if apply_cap:
+        cap_amount = st.sidebar.number_input(
+            "Max Capital Allocated to Pair (USD)",
+            min_value=0.0,
+            value=float(7_142_857.0),
+            step=10_000.0,
+        )
+        safety_margin_multiple = st.sidebar.number_input(
+            "Safety Margin Multiple",
+            min_value=1.0,
+            max_value=5.0,
+            value=float(DEFAULT_SAFETY_MARGIN),
+            step=0.1,
+        )
+        required_capital = required_capital * safety_margin_multiple
+        if required_capital > 0 and cap_amount >= 0:
+            scaling_factor = min(1.0, cap_amount / required_capital)
+        elif required_capital == 0:
+            scaling_factor = 1.0
+        else:
+            scaling_factor = 0.0
+
+    scaled_df = selected_df.copy()
+    for asset in (pair_cfg.asset_x, pair_cfg.asset_y):
+        pos_col = asset.position_col
+        scaled_df[pos_col] = scaled_df[pos_col] * scaling_factor
+        # Floor contract counts to whole numbers while preserving sign.
+        scaled_df[pos_col] = np.sign(scaled_df[pos_col]) * np.floor(np.abs(scaled_df[pos_col]))
+
+    for asset in (pair_cfg.asset_x, pair_cfg.asset_y):
+        calculate_pnl_for_asset(scaled_df, asset)
+    calculate_cash_and_margin(scaled_df, pair_cfg, params)
+    scaled_df["gross_pnl"] = scaled_df[pair_cfg.asset_x.pnl_col] + scaled_df[pair_cfg.asset_y.pnl_col]
+
+    if apply_cap:
+        st.caption(
+            f"Capital cap applied: ${cap_amount:,.0f}; "
+            f"required (with {safety_margin_multiple:.1f}x safety): ${required_capital:,.0f}; "
+            f"scaling factor: {scaling_factor:.2%}"
+        )
 
     start_label = start_date.strftime("%Y-%m-%d")
     end_label = end_date.strftime("%Y-%m-%d")
@@ -698,16 +761,16 @@ def main() -> None:
     # Plot selected range z-score
     fig_selected = make_subplots(rows=1, cols=1, shared_xaxes=True, vertical_spacing=0.3)
     fig_selected.add_trace(
-        go.Scatter(x=selected_df.index, y=selected_df["zscore"], name="Z-Score"),
+        go.Scatter(x=scaled_df.index, y=scaled_df["zscore"], name="Z-Score"),
         row=1,
         col=1,
     )
     fig_selected.update_layout(title="Selected Data Z-Score of Residuals")
     st.plotly_chart(fig_selected)
 
-    st.write(selected_df)
+    st.write(scaled_df)
 
-    df_display = selected_df[
+    df_display = scaled_df[
         [
             pair_cfg.asset_x.price_col,
             pair_cfg.asset_y.price_col,
@@ -732,8 +795,8 @@ def main() -> None:
     fig_positions = make_subplots(rows=1, cols=1, shared_xaxes=True, vertical_spacing=0.3)
     fig_positions.add_trace(
         go.Scatter(
-            x=selected_df.index,
-            y=selected_df[pair_cfg.asset_y.position_col],
+            x=scaled_df.index,
+            y=scaled_df[pair_cfg.asset_y.position_col],
             name=f"Position {pair_cfg.asset_y.display}",
         ),
         row=1,
@@ -741,8 +804,8 @@ def main() -> None:
     )
     fig_positions.add_trace(
         go.Scatter(
-            x=selected_df.index,
-            y=selected_df[pair_cfg.asset_x.position_col],
+            x=scaled_df.index,
+            y=scaled_df[pair_cfg.asset_x.position_col],
             name=f"Position {pair_cfg.asset_x.display}",
         ),
         row=1,
@@ -755,8 +818,8 @@ def main() -> None:
     fig_cum_pnl = make_subplots(rows=1, cols=1, shared_xaxes=True, vertical_spacing=0.3)
     fig_cum_pnl.add_trace(
         go.Scatter(
-            x=selected_df.index,
-            y=selected_df["gross_pnl"].cumsum(),
+            x=scaled_df.index,
+            y=scaled_df["gross_pnl"].cumsum(),
             name="Gross PnL",
         ),
         row=1,
@@ -769,10 +832,10 @@ def main() -> None:
     fig_gross_pnl = make_subplots(rows=1, cols=1, shared_xaxes=True, vertical_spacing=0.3)
     fig_gross_pnl.add_trace(
         go.Bar(
-            x=selected_df.index,
-            y=selected_df["gross_pnl"],
+            x=scaled_df.index,
+            y=scaled_df["gross_pnl"],
             name="Gross PnL",
-            marker_color=np.where(selected_df["gross_pnl"] >= 0, "green", "red"),
+            marker_color=np.where(scaled_df["gross_pnl"] >= 0, "green", "red"),
         ),
         row=1,
         col=1,
@@ -780,7 +843,7 @@ def main() -> None:
     fig_gross_pnl.update_layout(title=f"Gross PnL Over Time for {pair_name}")
     st.plotly_chart(fig_gross_pnl)
 
-    metrics = compute_performance_metrics(selected_df, pair_cfg)
+    metrics = compute_performance_metrics(scaled_df, pair_cfg)
     st.subheader("Performance Metrics")
     st.markdown(
         f"**Number of Trades Executed From {start_label} to {end_label}:** {metrics['num_trades']}"
@@ -794,7 +857,7 @@ def main() -> None:
     st.markdown(f"**Maximum Cash Deployed:** ${metrics['max_cash_deployed']:,.2f}")
     st.markdown(f"**Win Rate:** {metrics['win_rate']:.2%}")
 
-    blotter_df = build_blotter(selected_df, pair_cfg)
+    blotter_df = build_blotter(scaled_df, pair_cfg)
     df_xlsx = to_excel(blotter_df)
     st.sidebar.download_button(
         label="Download Blotter as Excel",
